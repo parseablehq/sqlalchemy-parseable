@@ -176,12 +176,19 @@ def connect(username: Optional[str] = None,
 
 # SQLAlchemy dialect
 class ParseableCompiler(compiler.SQLCompiler):
-    def visit_select(self, select, **kwargs):
-        return super().visit_select(select, **kwargs)
+    def visit_table(self, table, asfrom=False, iscrud=False, ashint=False, fromhints=None, **kwargs):
+        # Get the original table representation
+        text = super().visit_table(table, asfrom, iscrud, ashint, fromhints, **kwargs)
+        
+        # Remove schema prefix (anything before the dot)
+        if '.' in text:
+            return text.split('.')[-1]
+        return text 
 
 class ParseableDialect(default.DefaultDialect):
     name = 'parseable'
     driver = 'rest'
+    statement_compiler = ParseableCompiler
     
     supports_alter = False
     supports_pk_autoincrement = False
@@ -215,23 +222,153 @@ class ParseableDialect(default.DefaultDialect):
             return False
 
     def get_columns(self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw) -> List[Dict]:
-        return [
-            {
-                'name': 'timestamp',
-                'type': types.TIMESTAMP(),
-                'nullable': True,
-                'default': None,
-            },
-            {
-                'name': 'message',
-                'type': types.String(),
-                'nullable': True,
-                'default': None,
+        try:
+            # Get host and credentials from the connection object
+            host = connection.engine.url.host
+            port = connection.engine.url.port
+            username = connection.engine.url.username
+            password = connection.engine.url.password
+            base_url = f"http://{host}:{port}"
+            
+            # Prepare the headers for authorization
+            credentials = f"{username}:{password}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            headers = {
+                'Authorization': f'Basic {encoded_credentials}',
             }
-        ]
+            
+            # Fetch the schema for the given table (log stream)
+            response = requests.get(f"{base_url}/api/v1/logstream/{table_name}/schema", headers=headers)
+            
+            # Log the response details for debugging
+            print(f"Debug: Fetching schema for {table_name} from {base_url}/api/v1/logstream/{table_name}/schema", file=sys.stderr)
+            print(f"Response Status: {response.status_code}", file=sys.stderr)
+            print(f"Response Content: {response.text}", file=sys.stderr)
+            
+            if response.status_code != 200:
+                raise DatabaseError(f"Failed to fetch schema for {table_name}: {response.text}")
+            
+            # Parse the schema response
+            schema_data = response.json()
+            
+            if not isinstance(schema_data, dict) or 'fields' not in schema_data:
+                raise DatabaseError(f"Unexpected schema format for {table_name}: {response.text}")
+            
+            columns = []
+            
+            # Map each field to a SQLAlchemy column descriptor
+            for field in schema_data['fields']:
+                column_name = field['name']
+                data_type = field['data_type']
+                nullable = field['nullable']
+                
+                # Map Parseable data types to SQLAlchemy types
+                if data_type == 'Utf8':
+                    sql_type = types.String()
+                elif data_type == 'Int64':
+                    sql_type = types.BigInteger()
+                elif data_type == 'Float64':
+                    sql_type = types.Float()
+                else:
+                    sql_type = types.String()  # Default type if unknown
+                
+                # Append column definition to columns list
+                columns.append({
+                    'name': column_name,
+                    'type': sql_type,
+                    'nullable': nullable,
+                    'default': None,  # Assuming no default for now, adjust as needed
+                })
+            
+            return columns
+        
+        except Exception as e:
+            raise DatabaseError(f"Error fetching columns for {table_name}: {str(e)}")
+
 
     def get_table_names(self, connection: Connection, schema: Optional[str] = None, **kw) -> List[str]:
-        return ["adheip"]
+        """
+        Fetch the list of log streams (tables) from the Parseable instance.
+
+        :param connection: SQLAlchemy Connection object.
+        :param schema: Optional schema (not used for Parseable).
+        :param kw: Additional keyword arguments.
+        :return: List of table names (log streams).
+        """
+        try:
+            # Get host and credentials from the connection object
+            host = connection.engine.url.host
+            port = connection.engine.url.port
+            username = connection.engine.url.username
+            password = connection.engine.url.password
+            base_url = f"http://{host}:{port}"
+            
+            # Prepare the headers
+            credentials = f"{username}:{password}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            headers = {
+                'Authorization': f'Basic {encoded_credentials}',
+            }
+            
+            # Make the GET request
+            response = requests.get(f"{base_url}/api/v1/logstream", headers=headers)
+            
+            # Log the response details for debugging
+            print(f"Debug: Fetching table names from {base_url}/api/v1/logstream", file=sys.stderr)
+            print(f"Response Status: {response.status_code}", file=sys.stderr)
+            print(f"Response Content: {response.text}", file=sys.stderr)
+            
+            if response.status_code != 200:
+                raise DatabaseError(f"Failed to fetch table names: {response.text}")
+            
+            # Parse the response JSON
+            log_streams = response.json()
+            if not isinstance(log_streams, list):
+                raise DatabaseError(f"Unexpected response format: {response.text}")
+            
+            # Extract table names (log stream names)
+            return [stream['name'] for stream in log_streams if 'name' in stream]
+        except Exception as e:
+            raise DatabaseError(f"Error fetching table names: {str(e)}")
+
+    def has_table(self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw) -> bool:
+        """
+        Check if a table (log stream) exists in Parseable.
+        
+        :param connection: SQLAlchemy Connection object
+        :param table_name: Name of the table (log stream) to check
+        :param schema: Schema name (not used for Parseable)
+        :return: True if the table exists, False otherwise
+        """
+        try:
+            # Get connection details
+            host = connection.engine.url.host
+            port = connection.engine.url.port
+            username = connection.engine.url.username
+            password = connection.engine.url.password
+            base_url = f"http://{host}:{port}"
+            
+            # Prepare headers
+            credentials = f"{username}:{password}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            headers = {
+                'Authorization': f'Basic {encoded_credentials}',
+            }
+            
+            # Make request to list log streams
+            response = requests.get(f"{base_url}/api/v1/logstream", headers=headers)
+            
+            if response.status_code != 200:
+                return False
+                
+            log_streams = response.json()
+            
+            # Check if the table name exists in the list of log streams
+            return any(stream['name'] == table_name for stream in log_streams if 'name' in stream)
+            
+        except Exception as e:
+            print(f"Error checking table existence: {str(e)}", file=sys.stderr)
+            return False
 
     def get_view_names(self, connection: Connection, schema: Optional[str] = None, **kw) -> List[str]:
         return []
@@ -256,4 +393,3 @@ class ParseableDialect(default.DefaultDialect):
 
     def _check_unicode_description(self, connection: Connection):
         pass
-    
