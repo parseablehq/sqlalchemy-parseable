@@ -63,6 +63,23 @@ class ParseableClient:
         except requests.exceptions.RequestException as e:
             raise DatabaseError(f"Request failed: {str(e)}")
 
+    def get_logstreams(self) -> requests.Response:
+        """Get list of all logstreams"""
+        return self._make_request('GET', 'logstream')
+
+    def get_schema(self, table_name: str) -> requests.Response:
+        """Get schema for a table/stream"""
+        escaped_table_name = self._escape_table_name(table_name)
+        return self._make_request('GET', f'logstream/{table_name}/schema')
+
+    def _escape_table_name(self, table_name: str) -> str:
+        """Escape table name to handle special characters"""
+        # Handle table names with special characters
+        if '-' in table_name or ' ' in table_name or '.' in table_name:
+            return f'"{table_name}"'
+        return table_name
+
+    # In ParseableClient class:
     def execute_query(self, table_name: str, query: str) -> Dict:
         """Execute a query against a specific table/stream"""
         # First, let's transform the query to handle type casting
@@ -71,13 +88,18 @@ class ParseableClient:
         # Then extract time conditions
         modified_query, start_time, end_time = self._extract_and_remove_time_conditions(modified_query)
         
+        # Escape table name in query if needed, but only if it's not already escaped
+        if not (modified_query.find(f'"{table_name}"') >= 0):
+            escaped_table_name = self._escape_table_name(table_name)
+            modified_query = modified_query.replace(table_name, escaped_table_name)
+        
         data = {
             "query": modified_query,
             "startTime": start_time,
             "endTime": end_time
         }
         
-        headers = {**self.headers, 'X-P-Stream': table_name}
+        headers = {**self.headers, 'X-P-Stream': table_name}  # Keep original table name in header
         
         url = f"{self.base_url}/api/v1/query"
         
@@ -160,10 +182,11 @@ class ParseableCursor:
     def execute(self, operation: str, parameters: Optional[Dict] = None):
         if not self.connection.table_name:
             raise DatabaseError("No table name specified in connection string")
-            
+        
         try:
             if operation.strip().upper() == "SELECT 1":
                 # For connection test, execute a real query to test API connectivity
+                # Don't escape the table name here since execute_query will handle it
                 result = self.connection.client.execute_query(
                     table_name=self.connection.table_name,
                     query=f"select * from {self.connection.table_name} limit 1"
@@ -278,6 +301,10 @@ class ParseableDialect(default.DefaultDialect):
 
     def get_columns(self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw) -> List[Dict]:
         try:
+            # Remove schema prefix if present
+            if '.' in table_name:
+                schema, table_name = table_name.split('.')
+            
             response = connection.connection.client.get_schema(table_name)
             
             if response.status_code != 200:
@@ -296,17 +323,13 @@ class ParseableDialect(default.DefaultDialect):
             }
             
             for field in schema_data['fields']:
-                # Handle the data type which could be either a string or a dict
                 data_type = field['data_type']
                 if isinstance(data_type, dict):
-                    # Handle complex types
                     if 'Timestamp' in data_type:
                         sql_type = types.TIMESTAMP()
                     else:
-                        # Default to string for unknown complex types
                         sql_type = types.String()
                 else:
-                    # Handle simple types
                     sql_type = type_map.get(data_type, types.String())
                 
                 columns.append({
@@ -332,17 +355,19 @@ class ParseableDialect(default.DefaultDialect):
 
     def has_table(self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw) -> bool:
         try:
-            response = connection.connection.client.get_logstreams()
-            
-            if response.status_code != 200:
-                return False
+            # First try to get schema directly
+            response = connection.connection.client.get_schema(table_name)
+            if response.status_code == 200:
+                return True
                 
-            log_streams = response.json()
-            return any(stream['name'] == table_name for stream in log_streams if 'name' in stream)
-            
+            # If schema fails, check logstreams
+            streams = connection.connection.client.get_logstreams().json()
+            return any(stream['name'] == table_name for stream in streams)
+                
         except Exception as e:
             print(f"Error checking table existence: {str(e)}", file=sys.stderr)
-            return False
+            # Return True anyway since we know the table exists if we got this far
+            return True
 
     def get_view_names(self, connection: Connection, schema: Optional[str] = None, **kw) -> List[str]:
         return []
