@@ -27,12 +27,6 @@ class InterfaceError(Error):
 class DatabaseError(Error):
     pass
 
-def parse_timestamp(timestamp_str: str) -> datetime:
-    try:
-        return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-    except ValueError:
-        return None
-
 class ParseableClient:
     def __init__(self, host: str, port: str, username: str, password: str, verify_ssl: bool = True, use_https: bool = True):
         # Strip any existing protocol
@@ -167,6 +161,30 @@ class ParseableClient:
         except requests.exceptions.RequestException as e:
             print(f"\n=== QUERY ERROR ===\n{str(e)}\n================\n", file=sys.stderr)
             raise DatabaseError(f"Query execution failed: {str(e)}")
+
+    def _get_time_grain_expressions(self) -> Dict[str, str]:
+        """Time grain expressions for Parseable."""
+        return {
+            None: "{col}",
+            "second": "date_trunc('second', {col})",
+            "minute": "date_trunc('minute', {col})",
+            "hour": "date_trunc('hour', {col})",
+            "day": "date_trunc('day', {col})",
+            "week": "date_trunc('week', {col})",
+            "month": "date_trunc('month', {col})",
+            "quarter": "date_trunc('quarter', {col})",
+            "year": "date_trunc('year', {col})"
+        }
+
+    def _handle_epoch_timestamps(self, col: str, unit: str = 'ms') -> str:
+        """Convert epoch timestamps to datetime."""
+        if unit == 'ms':
+            return f"to_timestamp({col} / 1000)"
+        return f"to_timestamp({col})"
+
+    def convert_timestamp(self, dttm: datetime) -> str:
+        """Convert Python datetime to Parseable timestamp string."""
+        return f"'{dttm.strftime('%Y-%m-%dT%H:%M:%S.000')}'"
 
     def _extract_and_remove_time_conditions(self, query: str) -> Tuple[str, str, str]:
         """Extract time conditions from WHERE clause and remove them from query."""

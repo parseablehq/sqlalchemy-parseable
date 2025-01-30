@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="sqlalchemy-parseable",
-    version="0.1.1",
+    version="0.1.3",
     description="SQLAlchemy dialect for Parseable",
     author="Parseable",
     author_email="adheip@parseable.com",
