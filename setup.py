@@ -1,37 +1,31 @@
+# setup.py
 from setuptools import setup, find_packages
-
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
 
 setup(
     name="sqlalchemy-parseable",
-    version="0.1.0",
+    version="0.1.1",
+    description="SQLAlchemy dialect for Parseable",
     author="Parseable",
     author_email="adheip@parseable.com",
-    description="SQLAlchemy dialect for Parseable",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://github.com/parseablehq/sqlalchemy-parseable",
     packages=find_packages(),
+    python_requires=">=3.7",
+    install_requires=[
+        "sqlalchemy>=1.4.0",
+        "requests>=2.25.0",
+    ],
+    entry_points={
+        "sqlalchemy.dialects": [
+            "parseable = parseable_connector.parseable_dialect:ParseableDialect",
+            "parseable.http = parseable_connector.parseable_dialect:ParseableDialect",
+            "parseable.https = parseable_connector.parseable_dialect:ParseableDialect",
+        ],
+    },
     classifiers=[
-        "Intended Audience :: Developers",
-        "License :: OSI Approved :: Apache Software License",
-        "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-        "Topic :: Database",
     ],
-    python_requires=">=3.8",
-    install_requires=[
-        "sqlalchemy>=1.4.0",
-        "requests>=2.25.0"
-    ],
-    entry_points={
-        "sqlalchemy.dialects": [
-            "parseable = parseable_connector:ParseableDialect",
-        ],
-    }
 )
