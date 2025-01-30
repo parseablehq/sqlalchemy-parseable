@@ -1,10 +1,11 @@
-# setup.py
 from setuptools import setup, find_packages
 
 setup(
     name="sqlalchemy-parseable",
     version="0.1.3",
     description="SQLAlchemy dialect for Parseable",
+    long_description="A SQLAlchemy dialect for interacting with Parseable, a high-performance log analytics database.",
+    long_description_content_type="text/plain",
     author="Parseable",
     author_email="adheip@parseable.com",
     packages=find_packages(),
