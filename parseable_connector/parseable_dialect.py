@@ -302,6 +302,7 @@ class ParseableDialect(default.DefaultDialect):
     driver = 'rest'
     statement_compiler = ParseableCompiler
     
+    # Basic dialect properties
     supports_alter = False
     supports_pk_autoincrement = False
     supports_default_values = False
@@ -311,10 +312,23 @@ class ParseableDialect(default.DefaultDialect):
     returns_unicode_strings = True
     description_encoding = None
     supports_native_boolean = True
+    supports_multivalues_insert = False
+    
+    # Read-only properties
+    supports_statement_cache = True
+    is_readonly = True
+    supports_schemas = False
+    postfetch_lastrowid = False
+    supports_sane_rowcount = False
+    supports_sane_multi_rowcount = False
+    supports_default_metavalue = False
 
     @classmethod
     def dbapi(cls):
         return sys.modules[__name__]
+
+    def _get_server_version_info(self, connection):
+        return (1, 0, 0)
 
     def create_connect_args(self, url):
         table_name = url.database if url.database else None
@@ -341,6 +355,34 @@ class ParseableDialect(default.DefaultDialect):
         }
         print(f"\n=== CONNECTION ARGS ===\nProtocol: {'HTTPS' if use_https else 'HTTP'}\nPort: {kwargs['port']}\nSSL Verify: {kwargs['verify_ssl']}\n=====================\n", file=sys.stderr)
         return [], kwargs
+
+    def _check_unicode_returns(self, connection, additional_tests=None):
+        return True
+    
+    def _check_unicode_description(self, connection):
+        return True
+
+    def do_execute(self, cursor, statement, parameters, context=None):
+        """Execute a statement with parameters."""
+        import sqlparse
+        
+        # Parse and validate the SQL statement
+        parsed = sqlparse.parse(statement)
+        if not parsed:
+            raise DatabaseError("Empty SQL statement")
+            
+        stmt = parsed[0]
+        stmt_type = stmt.get_type().upper()
+        
+        # Only allow SELECT statements
+        if stmt_type not in ('SELECT', 'UNKNOWN'):
+            raise DatabaseError(f"Only SELECT statements are allowed. Got: {stmt_type}")
+            
+        # For UNKNOWN type, check if it starts with SELECT
+        if stmt_type == 'UNKNOWN' and not statement.strip().upper().startswith('SELECT'):
+            raise DatabaseError("Only SELECT statements are allowed")
+            
+        return cursor.execute(statement, parameters)
 
     def do_ping(self, dbapi_connection):
         try:
@@ -423,6 +465,29 @@ class ParseableDialect(default.DefaultDialect):
     def get_indexes(self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw) -> List[Dict[str, Any]]:
         return []
 
+    def get_isolation_level(self, connection):
+        """Return AUTOCOMMIT as isolation level."""
+        return 'AUTOCOMMIT'
+
+    def do_rollback(self, dbapi_connection):
+        """No-op for rollback in read-only mode."""
+        pass
+
+    def do_commit(self, dbapi_connection):
+        """No-op for commit in read-only mode."""
+        pass
+
+    def do_terminate(self, dbapi_connection):
+        """Close the connection."""
+        dbapi_connection.close()
+
+    def has_sequence(self, connection, sequence_name, schema=None):
+        return False
+
+    @classmethod
+    def get_sync_status(cls):
+        return True
+
 def connect(*args, **kwargs):
     """Connect to a Parseable database."""
     return ParseableConnection(
@@ -433,7 +498,7 @@ def connect(*args, **kwargs):
         database=kwargs.get('database'),
         verify_ssl=kwargs.get('verify_ssl', True),
         use_https=kwargs.get('use_https', True)
-    )
+)
 
 # Export the connect function at module level
 __all__ = ['ParseableDialect', 'connect', 'Error', 'DatabaseError', 'InterfaceError']
