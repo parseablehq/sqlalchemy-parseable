@@ -179,12 +179,8 @@ class ParseableClient:
             if has_p_timestamp and isinstance(result, list) and result:
                 for row in result:
                     if 'p_timestamp' not in row:
-                        # Use ctx#timestamp as p_timestamp if available, otherwise use current time
-                        if 'ctx#timestamp' in row:
-                            row['p_timestamp'] = row['ctx#timestamp']
-                        else:
-                            from datetime import datetime
-                            row['p_timestamp'] = datetime.now().isoformat()
+                        # Add a null value for the missing column rather than trying to derive it
+                        row['p_timestamp'] = None
             
             return result
         
