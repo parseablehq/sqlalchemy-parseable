@@ -119,6 +119,21 @@ class ParseableClient:
 
     def execute_query(self, table_name: str, query: str) -> Dict:
         """Execute a query against a specific table/stream"""
+        import re
+        
+        # Parse the original query to identify selected columns
+        select_pattern = r"SELECT\s+(.*?)\s+FROM"
+        select_match = re.search(select_pattern, query, re.IGNORECASE | re.DOTALL)
+        original_columns = []
+        
+        if select_match:
+            columns_str = select_match.group(1).strip()
+            original_columns = [col.strip() for col in columns_str.split(',')]
+        
+        # Check if p_timestamp is in the original columns
+        has_p_timestamp = any(col.strip() == 'p_timestamp' for col in original_columns)
+        
+        # Transform and extract time conditions
         modified_query = self._transform_query(query)
         modified_query, start_time, end_time = self._extract_and_remove_time_conditions(modified_query)
         
@@ -140,6 +155,7 @@ class ParseableClient:
         print(f"Original Query: {query}", file=sys.stderr)
         print(f"Modified Query: {modified_query}", file=sys.stderr)
         print(f"Time Range: {start_time} to {end_time}", file=sys.stderr)
+        print(f"Original Columns: {original_columns}", file=sys.stderr)
         
         try:
             response = requests.post(
@@ -157,7 +173,21 @@ class ParseableClient:
             print("=====================\n", file=sys.stderr)
             
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # If p_timestamp was in original query but not in results, add it
+            if has_p_timestamp and isinstance(result, list) and result:
+                for row in result:
+                    if 'p_timestamp' not in row:
+                        # Use ctx#timestamp as p_timestamp if available, otherwise use current time
+                        if 'ctx#timestamp' in row:
+                            row['p_timestamp'] = row['ctx#timestamp']
+                        else:
+                            from datetime import datetime
+                            row['p_timestamp'] = datetime.now().isoformat()
+            
+            return result
+        
         except requests.exceptions.RequestException as e:
             print(f"\n=== QUERY ERROR ===\n{str(e)}\n================\n", file=sys.stderr)
             raise DatabaseError(f"Query execution failed: {str(e)}")
@@ -187,9 +217,16 @@ class ParseableClient:
         return f"'{dttm.strftime('%Y-%m-%dT%H:%M:%S.000')}'"
 
     def _extract_and_remove_time_conditions(self, query: str) -> Tuple[str, str, str]:
-        """Extract time conditions from WHERE clause and remove them from query."""
+        """Extract time conditions from WHERE clause and remove them from query.
+        
+        Also preserves p_timestamp in SELECT if it exists.
+        """
         import re
         
+        # Check if p_timestamp is in the SELECT clause
+        has_p_timestamp_select = re.search(r'SELECT\b.*\bp_timestamp\b.*\bFROM\b', query, re.IGNORECASE | re.DOTALL) is not None
+        
+        # Look for time conditions in WHERE clause
         timestamp_pattern = r"WHERE\s+p_timestamp\s*>=\s*'([^']+)'\s*AND\s+p_timestamp\s*<\s*'([^']+)'"
         match = re.search(timestamp_pattern, query, re.IGNORECASE)
         
@@ -200,9 +237,18 @@ class ParseableClient:
             where_clause = match.group(0)
             modified_query = query.replace(where_clause, '')
             
+            # If p_timestamp was in SELECT but not as a result column, remove it
+            if has_p_timestamp_select:
+                # We need to preserve p_timestamp in SELECT clause
+                pass
+            else:
+                # Remove p_timestamp from SELECT if it's there but wasn't in original SELECT
+                modified_query = re.sub(r'SELECT\b(.*),\s*p_timestamp\b', r'SELECT\1', modified_query, flags=re.IGNORECASE)
+            
+            # Fix WHERE clause if needed
             if 'WHERE' in modified_query.upper():
                 modified_query = modified_query.replace('AND', 'WHERE', 1)
-                
+                    
             return modified_query.strip(), start_str, end_str
         
         return query.strip(), "10m", "now"
@@ -230,6 +276,28 @@ class ParseableCursor:
                 self.description = [("result", types.INTEGER, None, None, None, None, None)]
                 return self._rowcount
             
+            # Extract column names from the query
+            import re
+            select_match = re.search(r"SELECT\s+(.*?)\s+FROM", operation, re.IGNORECASE | re.DOTALL)
+            expected_columns = []
+            
+            if select_match:
+                columns_str = select_match.group(1).strip()
+                # Handle "AS" aliases
+                columns = []
+                for col in columns_str.split(','):
+                    col = col.strip()
+                    as_match = re.search(r'(.*?)\s+AS\s+(.*)', col, re.IGNORECASE)
+                    if as_match:
+                        columns.append(as_match.group(2).strip(' "\''))
+                    else:
+                        # Remove table qualifiers if present
+                        col = col.split('.')[-1].strip(' "\'')
+                        columns.append(col)
+                expected_columns = columns
+            
+            print(f"Expected columns from query: {expected_columns}", file=sys.stderr)
+            
             result = self.connection.client.execute_query(
                 table_name=self.connection.table_name,
                 query=operation
@@ -239,7 +307,28 @@ class ParseableCursor:
                 self._rows = result
                 self._rowcount = len(result)
                 
-                if self._rows:
+                # Ensure consistency between expected columns and result columns
+                if self._rows and expected_columns:
+                    # Reorder and/or add missing columns to match expected columns
+                    reordered_rows = []
+                    for row in self._rows:
+                        new_row = {}
+                        for col in expected_columns:
+                            if col in row:
+                                new_row[col] = row[col]
+                            else:
+                                # Add a placeholder for missing columns
+                                new_row[col] = None
+                        reordered_rows.append(new_row)
+                    self._rows = reordered_rows
+                    
+                    # Set description based on expected columns
+                    self.description = [
+                        (col, types.VARCHAR, None, None, None, None, None)
+                        for col in expected_columns
+                    ]
+                elif self._rows:
+                    # If no expected columns parsed, use the first row's keys
                     first_row = self._rows[0]
                     self.description = [
                         (col, types.VARCHAR, None, None, None, None, None)
@@ -252,12 +341,37 @@ class ParseableCursor:
             raise DatabaseError(str(e))
 
     def fetchone(self) -> Optional[Tuple]:
+        """Fetch one row from the result set.
+        
+        Returns values in the order specified by self.description.
+        """
         if not self._rows:
             return None
-        return tuple(self._rows.pop(0).values())
+            
+        row = self._rows.pop(0)
+        
+        # If we have a description, ensure values are returned in the correct order
+        if self.description:
+            column_names = [desc[0] for desc in self.description]
+            return tuple(row.get(col, None) for col in column_names)
+        else:
+            return tuple(row.values())
 
     def fetchall(self) -> List[Tuple]:
-        result = [tuple(row.values()) for row in self._rows]
+        """Fetch all rows from the result set.
+        
+        Returns values in the order specified by self.description.
+        """
+        if not self._rows:
+            return []
+            
+        # If we have a description, ensure values are returned in the correct order
+        if self.description:
+            column_names = [desc[0] for desc in self.description]
+            result = [tuple(row.get(col, None) for col in column_names) for row in self._rows]
+        else:
+            result = [tuple(row.values()) for row in self._rows]
+            
         self._rows = []
         return result
 
