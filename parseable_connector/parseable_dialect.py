@@ -227,8 +227,20 @@ class ParseableClient:
         match = re.search(timestamp_pattern, query, re.IGNORECASE)
         
         if match:
-            start_str = match.group(1).replace(' ', 'T') + 'Z'
-            end_str = match.group(2).replace(' ', 'T') + 'Z'
+            # Process start time
+            start_raw = match.group(1)
+            # Split on possible fractional seconds
+            start_parts = start_raw.split('.')
+            start_dt = start_parts[0].replace(' ', 'T')
+            # Add timezone offset
+            start_str = f"{start_dt}+00:00"
+            
+            # Process end time
+            end_raw = match.group(2)
+            end_parts = end_raw.split('.')
+            end_dt = end_parts[0].replace(' ', 'T')
+            # Add timezone offset
+            end_str = f"{end_dt}+00:00"
             
             where_clause = match.group(0)
             modified_query = query.replace(where_clause, '')
